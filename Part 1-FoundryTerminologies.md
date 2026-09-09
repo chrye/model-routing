@@ -1,17 +1,19 @@
-# Based only on current Microsoft Learn documentation, the accurate terminology is:  
+# Microsoft Foundry — Terminology Reference
+
+Based on current Microsoft Learn documentation, the accurate terminology is:
 
 ```text
 Azure subscription  
 └── Resource group  
     └── Microsoft Foundry resource 
         ├── Foundry project  
-        │   ├── Agents, tools, files, evaluations, connections, etc.  
+        │   ├── Project assets, connections, agents, evaluations, and tools  
         │   └── Project endpoint  
+        │   └── Managed compute deployments, when used
         │  
-        ├── Model deployment  
+        ├── Standard model deployments in the Foundry resource
         │   ├── Deployment name  
-        │   ├── Model name  
-        │   ├── Model version  
+        │   ├── Model name and version
         │   ├── Deployment option/type and SKU  
         │   └── Content filter and capacity configuration  
         │  
@@ -20,7 +22,7 @@ Azure subscription
 
 ## 1. Azure subscription  
 
-The Azure subscription is the billing, quota, policy, and access boundary above the Foundry resource.  
+The Azure subscription is the billing, quota, policy, and access boundary above the Foundry resource. Specific quota is often additionally scoped by region, model, and deployment type.
 A subscription contains one or more resource groups.  
 
 ## 2. Resource group  
@@ -47,7 +49,7 @@ You may still encounter terms such as:
 - AI Services resource  
 - Foundry account/resource  
 
-For current architecture discussions, I would say Foundry resource, not simply "Foundry account," unless describing a specific Azure resource type or API property.  
+Note: the underlying ARM resource type is `Microsoft.CognitiveServices/accounts` with `kind = AIServices`, so "AI Services resource" and "account" are not purely legacy — they are the ARM-level identity of the resource. "Foundry resource" is the preferred narrative term for current architecture discussions.
 
 The Foundry resource is the parent Azure resource that provides access to models, agents, tools, credentials, and service endpoints. Microsoft explicitly says that a Foundry resource provides unified access to models, agents, and tools. Microsoft Foundry SDKs and endpoints.  
 
@@ -56,13 +58,12 @@ Region: West US 2
 
 The following are two __supported inference surfaces__ over the same Microsoft Foundry resource, optimized for different use cases.
 #### 1. Foundry project endpoint
-Use the following endpoint to call all your deployed base models (Microsoft Foundry project endpoint root):
+Use the following endpoint to access Foundry project APIs, supported model inference capabilities (Microsoft Foundry project endpoint root):
 ```
 https://contoso-foundry.services.ai.azure.com/api/projects/<your_project_name>
 ```
 
 For the Responses API, the complete runtime URL is:
-
 ```
 POST https://contoso-foundry.services.ai.azure.com/api/projects/<your_project_name>/openai/v1/responses
 ```
@@ -157,11 +158,13 @@ For your customer, the terminology should be:
 New Foundry resource
 └── New Foundry project
     └── Azure OpenAI connection
-        └── Existing Azure OpenAI resource
-            └── legacy-gpt-4o deployment
+        └── References an existing Azure OpenAI resource
+
+Existing Azure OpenAI resource
+└── legacy-gpt-4o deployment
 ```
 
-Do not say that the connection "moves the model into the new Foundry project." It references the separately existing Azure OpenAI resource.  
+Do not think that the connection "moves the model into the new Foundry project." A connection lets the project authenticate to and consume a separately existing Azure OpenAI resource.
 
 ## 6. Model  
 
@@ -226,10 +229,11 @@ Request:
 
 A deployment has an operational or capacity configuration. Current Foundry documentation distinguishes deployment options such as:  
 
-- __Serverless API__ — used by Azure OpenAI and other Foundry Models sold by Azure.  
-- __Managed compute__ — used for open-source and custom models on dedicated compute; some scenarios are in preview.  
+- __Standard deployment in Foundry resources__ — the preferred, resource-level option in the new Foundry portal for Azure OpenAI and other Foundry Models sold by Azure. Uses the Serverless API deployment option under the hood (pay-per-token or PTU).
+- __Serverless API endpoint__ (classic) — a hub-only deployment option in classic Foundry, scoped to an AI hub-based project. Not the same as the resource-level standard deployment above.
+- __Managed compute__ — used for open-source and custom models on dedicated compute. 
 
-Within Serverless API, deployment types include categories such as:  
+Within the Serverless API deployment option, deployment types include categories such as:  
 
 Standard  
 Provisioned  
@@ -289,14 +293,15 @@ This endpoint includes the project name and is used for Foundry project APIs and
 
 C. Other service or protocol endpoints  
 
-A Foundry resource may expose additional protocol-specific or tool-specific endpoints, for example an Anthropic-compatible endpoint or endpoints for individual Foundry Tools. Microsoft documents that endpoint choice depends on the SDK and capability being used. 
+A Foundry resource may expose additional protocol-specific or tool-specific endpoints. For example, the Anthropic endpoint at `https://<foundry-resource>.services.ai.azure.com/anthropic` (with the Messages API at `/anthropic/v1/messages`) is used for Claude models, and individual Foundry Tools (Speech, Vision, Content Safety, etc.) have their own endpoints. Microsoft documents that endpoint choice depends on the SDK and capability being used. 
 
 Microsoft Foundry SDKs and endpoints: https://learn.microsoft.com/en-us/azure/foundry/how-to/develop/sdk-overview
 
 
 This particular customer configuration could be described this way: 
 
-The customer has a new Microsoft Foundry resource in West US 2. Under that resource, they created a Foundry project. The project has an Azure OpenAI connection referencing an existing Azure OpenAI resource that was previously used by a hub-based project. That existing Azure OpenAI resource contains the legacy-gpt-4o model deployment. The deployment uses GPT-4o as the underlying model. The application reaches the model through an inference endpoint, potentially through APIM.
+The customer has a new Microsoft Foundry resource in West US 2. Under that resource, they created a Foundry project. The project has an Azure OpenAI connection referencing an existing Azure OpenAI resource that was previously used by a hub-based project. That existing Azure OpenAI resource contains the legacy-gpt-4o model deployment. The deployment uses GPT-4o as the underlying model. The application, agent, or configured Foundry capability can use that connection where supported. Direct model inference can continue to target the existing Azure OpenAI resource’s inference endpoint, optionally through API Management.
+
 
 Expanded:  
 ```text
@@ -340,20 +345,32 @@ Azure subscription
 Correct Interpretation:  
 ```text
 Subscription
-  -> Resource group
-    -> Foundry resource
-      -> Foundry project
-        -> Project assets and connections
+└── Resource group
+    └── Foundry resource
+        ├── Foundry project
+        │   ├── Agents, evaluations, tools, files, and project configuration
+        │   ├── Project- or resource-level connections
+        │   ├── Project endpoint
+        │   └── Managed compute deployments, when used
+        │
+        └── Standard model deployments in the Foundry resource
+            ├── Deployment name
+            ├── Underlying model name and version
+            ├── Deployment type or SKU
+            ├── Capacity or throughput configuration
+            └── Content-filter configuration
 
-Foundry resource or connected Azure OpenAI resource
-  -> Model deployment
-    -> Deployment name
-    -> Underlying model name and version
-    -> Deployment type/SKU
-    -> Capacity and content-filter configuration
+Separately connected resource
+└── Existing Azure OpenAI resource
+    └── Existing Azure OpenAI model deployment
 
 Runtime access
-  -> Project endpoint or resource-level inference endpoint
-  -> API operation, such as /openai/v1/responses
-  -> Deployment selected using the request's model field
+├── Project endpoint  (.services.ai.azure.com/api/projects/<project>)
+│   ├── Foundry project APIs (agents, evaluations, connections)
+│   └── /openai/v1/responses — Responses API + platform tools
+├── Resource endpoint (.openai.azure.com/openai/v1)
+│   └── OpenAI-compatible API; required for embeddings
+├── Anthropic endpoint (.services.ai.azure.com/anthropic) — Claude models
+├── Foundry Tools endpoints — Vision, Speech, Content Safety, etc.
+└── Optional API Management gateway in front of any of the above
 ```
