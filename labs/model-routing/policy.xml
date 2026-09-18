@@ -1,0 +1,116 @@
+<!-- /policies -->
+<policies>
+    <inbound>
+        <base />
+        <!-- 1a – deployment-id from the route template -->
+        <set-variable name="deployment" value="@(context.Request.MatchedParameters.ContainsKey("deployment-id") 
+                           ? context.Request.MatchedParameters["deployment-id"] 
+                           : string.Empty)" />
+        <!-- 1b – model from the request body (JSON) -->
+        <set-variable name="reqBody" value="@(context.Request.Body?.As<JObject>(preserveContent:true) 
+                           ?? new JObject())" />
+        <set-variable name="model" value="@( ((JObject)context.Variables["reqBody"])
+                              .Property("model")?.Value?.ToString() 
+                              ?? string.Empty)" />
+        <!-- 1c – first non-empty of deployment-id or model -->
+        <set-variable name="requestedModel" value="@( !string.IsNullOrEmpty((string)context.Variables["deployment"]) 
+                           ? (string)context.Variables["deployment"]
+                           : (string)context.Variables["model"] )" />
+        <!-- Emit LLM token-usage metrics to Application Insights / Log Analytics -->
+        <azure-openai-emit-token-metric namespace="model-routing">
+            <dimension name="Subscription ID" value="@(context.Subscription.Id)" />
+            <dimension name="Client IP" value="@(context.Request.IpAddress)" />
+            <dimension name="API ID" value="@(context.Api.Id)" />
+            <dimension name="Requested Model" value="@((string)context.Variables.GetValueOrDefault("requestedModel", "unknown"))" />
+        </azure-openai-emit-token-metric>
+        <!-- 2. Decide what to do with the request -->
+        <choose>
+            <!-- route GPT-4.1 from Sweden Central -->
+            <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-4.1")">
+                <set-backend-service backend-id="foundry1" />
+            </when>
+            <!-- route GPT-5 nano from Central US -->
+            <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-5-nano")">
+                <set-backend-service backend-id="foundry2" />
+            </when>
+            <!-- Scenario 1: gpt-5-mini has two deployments on the SAME foundry2 Foundry resource (gpt-5-mini-ptu primary, gpt-5-mini-tpm spillover).
+                 Deployment-level failover on HTTP 429 is handled in the <backend> section below. -->
+            <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-5-mini")">
+                <set-backend-service backend-id="foundry2" />
+                <set-variable name="miniAttempt" value="@(0)" />
+            </when>
+            <!-- Scenario 2: gpt-5.4-mini is served by a priority backend pool (foundry6 primary -> foundry7 spillover).
+                 The per-backend circuit breaker trips foundry6 on 429 so the pool routes to foundry7. -->
+            <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-5.4-mini")">
+                <set-backend-service backend-id="gpt54mini-pool" />
+            </when>
+            <!-- route the flagship GPT-5 models from East US 2 -->
+            <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-5-pro"
+                            || ((string)context.Variables["requestedModel"]) == "gpt-5.6-terra")">
+                <set-backend-service backend-id="foundry3" />
+            </when>
+            <!-- route the legacy deployment through the classic Azure OpenAI account connected to the hub-based project -->
+            <when condition="@( ((string)context.Variables["requestedModel"]) == "legacy-gpt-4o")">
+                <set-backend-service backend-id="foundry4" />
+            </when>
+            <!-- gate any GPT-4o* variants -->
+            <when condition="@( ((string)context.Variables["requestedModel"] ?? string.Empty)
+                           .StartsWith("gpt-4o"))">
+                <return-response>
+                    <set-status code="403" reason="Forbidden" />
+                    <set-body>@("{\"error\":\"Model '" + (string)context.Variables["requestedModel"] + "' is not permitted.\"}")</set-body>
+                </return-response>
+            </when>
+            <!-- catch-all -->
+            <otherwise>
+                <return-response>
+                    <set-status code="400" reason="Bad Request" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>{
+              "error": "Invalid model or deployment-id. Supply a valid name in the URL or JSON body."
+            }</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+    </inbound>
+    <backend>
+        <choose>
+            <!-- Scenario 1: deployment-level PTU/TPM spillover for gpt-5-mini on a single Foundry resource.
+                 Attempt 1 -> gpt-5-mini-ptu (low-capacity primary). On 429, retry -> gpt-5-mini-tpm.
+                 The deployment id lives in the path for Chat Completions and in the body "model" for the Responses API,
+                 so both are rewritten to the selected deployment on each attempt. -->
+            <when condition="@( ((string)context.Variables["requestedModel"] ?? string.Empty) == "gpt-5-mini")">
+                <retry condition="@(context.Response != null && context.Response.StatusCode == 429 && (int)context.Variables["miniAttempt"] < 2)" count="1" interval="0" first-fast-retry="true">
+                    <set-variable name="miniAttempt" value="@((int)context.Variables["miniAttempt"] + 1)" />
+                    <set-variable name="miniDeployment" value="@(((int)context.Variables["miniAttempt"]) == 1 ? "gpt-5-mini-ptu" : "gpt-5-mini-tpm")" />
+                    <rewrite-uri template="@{
+                        string p = context.Request.OriginalUrl.Path;
+                        int idx = p.IndexOf("/openai");
+                        string tail = idx >= 0 ? p.Substring(idx) : p;
+                        tail = tail.Replace("/deployments/gpt-5-mini/", "/deployments/" + (string)context.Variables["miniDeployment"] + "/");
+                        string qs = context.Request.OriginalUrl.QueryString ?? string.Empty;
+                        if (qs.StartsWith("?")) { qs = qs.Substring(1); }
+                        return string.IsNullOrEmpty(qs) ? tail : (tail + "?" + qs);
+                    }" />
+                    <set-body>@{
+                        var body = context.Request.Body.As<JObject>(preserveContent: true);
+                        if (body["model"] != null) { body["model"] = (string)context.Variables["miniDeployment"]; }
+                        return body.ToString();
+                    }</set-body>
+                    <forward-request buffer-request-body="true" />
+                </retry>
+            </when>
+            <otherwise>
+                <forward-request />
+            </otherwise>
+        </choose>
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
