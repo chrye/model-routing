@@ -8,7 +8,5 @@
 .vscode
 /labs/_deprecated/
 /modules/
-pyproject.toml
 pyrightconfig.json
 /scripts/
-uv.lock
