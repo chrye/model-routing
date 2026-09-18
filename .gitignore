@@ -7,6 +7,5 @@
 .python-version
 .vscode
 /labs/_deprecated/
-/modules/
 pyrightconfig.json
 /scripts/
