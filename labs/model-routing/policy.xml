@@ -33,13 +33,18 @@
             <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-5-nano")">
                 <set-backend-service backend-id="foundry2" />
             </when>
-            <!-- Scenario 1: gpt-5-mini has two deployments on the SAME foundry2 Foundry resource (gpt-5-mini-ptu primary, gpt-5-mini-tpm spillover).
-                 Deployment-level failover on HTTP 429 is handled in the <backend> section below. -->
+            <!-- Scenario 2: gpt-5-mini has two deployments on the SAME foundry2 Foundry resource
+                 (gpt-5-mini-ptu primary, gpt-5-mini-tpm spillover). Each deployment is fronted by its own
+                 single-member backend pool, so the PTU and TPM paths are addressable as distinct backend ids.
+                 Attempt 1 selects the PTU pool; the <retry> in the <backend> section below explicitly
+                 re-selects the TPM pool on HTTP 429. Deliberately NO circuit breaker: the retry names its
+                 target, so breaker state is never consulted, and a tripped breaker on a single-member pool
+                 would leave that pool with no routable member. -->
             <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-5-mini")">
-                <set-backend-service backend-id="foundry2" />
+                <set-backend-service backend-id="gpt5mini-ptu-pool" />
                 <set-variable name="miniAttempt" value="@(0)" />
             </when>
-            <!-- Scenario 2: gpt-5.4-mini is served by a priority backend pool (foundry6 primary -> foundry7 spillover).
+            <!-- Scenario 3: gpt-5.4-mini is served by a priority backend pool (foundry6 primary -> foundry7 spillover).
                  The per-backend circuit breaker trips foundry6 on 429 so the pool routes to foundry7. -->
             <when condition="@( ((string)context.Variables["requestedModel"]) == "gpt-5.4-mini")">
                 <set-backend-service backend-id="gpt54mini-pool" />
@@ -77,14 +82,22 @@
     </inbound>
     <backend>
         <choose>
-            <!-- Scenario 1: deployment-level PTU/TPM spillover for gpt-5-mini on a single Foundry resource.
-                 Attempt 1 -> gpt-5-mini-ptu (low-capacity primary). On 429, retry -> gpt-5-mini-tpm.
-                 The deployment id lives in the path for Chat Completions and in the body "model" for the Responses API,
-                 so both are rewritten to the selected deployment on each attempt. -->
+            <!-- Scenario 2: deployment-level PTU/TPM spillover for gpt-5-mini on a single Foundry resource.
+                 Attempt 1 -> gpt5mini-ptu-pool / gpt-5-mini-ptu (low-capacity primary).
+                 On 429, retry -> gpt5mini-tpm-pool / gpt-5-mini-tpm.
+                 Two things change on the retry:
+                   1. set-backend-service switches the selected backend from the PTU pool to the TPM pool.
+                   2. the deployment name is rewritten. This step is NOT optional: both pools resolve to the
+                      same foundry2 host (deployments are resource-scoped, APIM backends are host-scoped),
+                      so the pool switch alone cannot pick a deployment. The deployment id lives in the path
+                      for Chat Completions and in the body "model" for the Responses API, so both are rewritten.
+                 No circuit breaker is configured on either pool - the retry names its target explicitly. -->
             <when condition="@( ((string)context.Variables["requestedModel"] ?? string.Empty) == "gpt-5-mini")">
                 <retry condition="@(context.Response != null && context.Response.StatusCode == 429 && (int)context.Variables["miniAttempt"] < 2)" count="1" interval="0" first-fast-retry="true">
                     <set-variable name="miniAttempt" value="@((int)context.Variables["miniAttempt"] + 1)" />
                     <set-variable name="miniDeployment" value="@(((int)context.Variables["miniAttempt"]) == 1 ? "gpt-5-mini-ptu" : "gpt-5-mini-tpm")" />
+                    <set-variable name="miniPool" value="@(((int)context.Variables["miniAttempt"]) == 1 ? "gpt5mini-ptu-pool" : "gpt5mini-tpm-pool")" />
+                    <set-backend-service backend-id="@((string)context.Variables["miniPool"])" />
                     <rewrite-uri template="@{
                         string p = context.Request.OriginalUrl.Path;
                         int idx = p.IndexOf("/openai");
@@ -109,6 +122,21 @@
     </backend>
     <outbound>
         <base />
+        <!-- Scenario 2 observability: surface which pool / deployment actually served the request,
+             and how many attempts it took, so the PTU -> TPM spillover is visible to the caller. -->
+        <choose>
+            <when condition="@(context.Variables.ContainsKey("miniDeployment"))">
+                <set-header name="x-served-deployment" exists-action="override">
+                    <value>@((string)context.Variables["miniDeployment"])</value>
+                </set-header>
+                <set-header name="x-served-pool" exists-action="override">
+                    <value>@((string)context.Variables["miniPool"])</value>
+                </set-header>
+                <set-header name="x-served-attempts" exists-action="override">
+                    <value>@(((int)context.Variables["miniAttempt"]).ToString())</value>
+                </set-header>
+            </when>
+        </choose>
     </outbound>
     <on-error>
         <base />

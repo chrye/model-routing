@@ -55,12 +55,12 @@ APIM is configured with **seven backends**. Five are Foundry (`AIServices`) reso
 | Backend | Kind · region | Deployments (model · version · SKU / capacity) | Why it exists |
 |---|---|---|---|
 | **foundry1** | AIServices · swedencentral | `gpt-4.1` — gpt-4.1 · 2025-04-14 · GlobalStandard / 20 | Baseline single-model route |
-| **foundry2** | AIServices · centralus | `gpt-5-mini-ptu` — gpt-5-mini · 2025-08-07 · GlobalStandard / **1**<br>`gpt-5-mini-tpm` — gpt-5-mini · 2025-08-07 · GlobalStandard / 20<br>`gpt-5-nano` — gpt-5-nano · 2025-08-07 · GlobalStandard / 20 | **Scenario 1** — two deployments of one model on one resource |
+| **foundry2** | AIServices · centralus | `gpt-5-mini-ptu` — gpt-5-mini · 2025-08-07 · GlobalStandard / **1**<br>`gpt-5-mini-tpm` — gpt-5-mini · 2025-08-07 · GlobalStandard / 20<br>`gpt-5-nano` — gpt-5-nano · 2025-08-07 · GlobalStandard / 20 | **Scenario 2** — two deployments of one model on one resource |
 | **foundry3** | AIServices · eastus2 | `gpt-5-pro` — 2025-10-06 · GlobalStandard / 20<br>`gpt-5.6-terra` — 2026-07-09 · GlobalStandard / 20 | Newer models; `gpt-5-pro` is **Responses API only**, `gpt-5.6-terra` supports both surfaces |
 | **foundry4** | classic Azure OpenAI · eastus2 | `legacy-gpt-4o` — gpt-4o · 2024-11-20 · GlobalStandard / 20 | Legacy hub-based topology behind the same gateway |
 | **foundry5** | AIServices · eastus2 | none | Foundry project holding an **Azure OpenAI connection** to foundry4 |
-| **foundry6** | AIServices · eastus2 | `gpt-5.4-mini` — 2026-03-17 · GlobalStandard / **1** | **Scenario 2** primary — pool priority 1, circuit breaker |
-| **foundry7** | AIServices · eastus2 | `gpt-5.4-mini` — 2026-03-17 · GlobalStandard / 20 | **Scenario 2** spillover — pool priority 2, circuit breaker |
+| **foundry6** | AIServices · eastus2 | `gpt-5.4-mini` — 2026-03-17 · GlobalStandard / **1** | **Scenario 3** primary — pool priority 1, circuit breaker |
+| **foundry7** | AIServices · eastus2 | `gpt-5.4-mini` — 2026-03-17 · GlobalStandard / 20 | **Scenario 3** spillover — pool priority 2, circuit breaker |
 
 > The two primaries use capacity `1` to lower their quota so they return HTTP 429 sooner. Both are `GlobalStandard`, not provisioned throughput — they **simulate** a saturated PTU deployment rather than being one.
 
@@ -78,9 +78,9 @@ The API is deployed as a **pass-through** API (`inferenceAPIType = "PassThrough"
 |---|---|---|
 | `gpt-4.1` | foundry1 | Direct |
 | `gpt-5-nano` | foundry2 | Direct |
-| `gpt-5-mini` | foundry2 | **Deployment-level failover** — `gpt-5-mini-ptu`, retry to `gpt-5-mini-tpm` on 429 (Scenario 1) |
+| `gpt-5-mini` | foundry2 | **Deployment-level failover** — `gpt-5-mini-ptu`, retry to `gpt-5-mini-tpm` on 429 (Scenario 2) |
 | `gpt-5-pro`, `gpt-5.6-terra` | foundry3 | Direct |
-| `gpt-5.4-mini` | `gpt54mini-pool` | **Backend-pool failover** — foundry6 → foundry7 on 429 (Scenario 2) |
+| `gpt-5.4-mini` | `gpt54mini-pool` | **Backend-pool failover** — foundry6 → foundry7 on 429 (Scenario 3) |
 | `legacy-gpt-4o` | foundry4 | Legacy classic Azure OpenAI |
 | `gpt-4o*` | — | Gated: returns `403 Forbidden` |
 | anything else | — | Returns `400 Bad Request` |
@@ -89,29 +89,31 @@ The API is deployed as a **pass-through** API (`inferenceAPIType = "PassThrough"
 
 ## Spillover patterns
 
-Both scenarios do the same thing — the primary saturates, traffic overflows to a secondary. They differ in where the failover happens.
+Both scenarios do the same thing — the primary saturates, traffic overflows to a secondary. They differ in where the failover happens. Numbering matches the catalogue in [Part 2 — PTU → TPM failover options](<Part 2-PTU-to-TPM-Failover-Options.md>); Scenario 1 there is Foundry's platform-native spillover, which this lab cannot demonstrate without real provisioned capacity.
 
-| | Scenario 1 — one resource | Scenario 2 — two resources |
+| | Scenario 2 — one resource | Scenario 3 — two resources |
 |---|---|---|
 | Failover unit | Two deployments on one Foundry resource | Two Foundry resources in one pool |
-| Mechanism | `<retry>` in the policy's `<backend>` section | APIM backend pool (priority-based) + per-backend circuit breaker |
+| Mechanism | `<retry>` in the policy's `<backend>` section, switching between two single-member pools | APIM backend pool (priority-based) + per-backend circuit breaker |
+| Circuit breaker | None — the retry names its target explicitly | Required — it is the only "unhealthy" signal the pool has |
 | Recovers the *same* request | Yes | No — [see below](#the-request-that-trips-the-breaker-is-not-recovered) |
-| Why this way | Both deployments share one endpoint, so they are one APIM backend and a pool cannot distinguish them | Distinct endpoints, so the pool works natively |
+| Why this way | Both deployments share one endpoint, so a pool cannot *by itself* distinguish them — the policy must rewrite the deployment name | Distinct endpoints, so the pool works natively |
 | Reusable beyond PTU→TPM | Narrow — needs two deployments on one endpoint | Broad — the same pool also does blue/green (weighted), spreading load across per-region quota, and surviving a throttled or unhealthy region |
 
 > APIM backend pools support round-robin, weighted, and priority-based selection. There is no latency-aware or health-probe-based option — lower-priority groups are used only when every backend in the higher-priority groups has a tripped circuit breaker.
 
-### Scenario 1 — deployment-level failover (one Foundry resource)
+### Scenario 2 — deployment-level failover (one Foundry resource)
 
-`gpt-5-mini` is deployed **twice on the same `foundry2` Foundry resource** with distinct deployment names: `gpt-5-mini-ptu` (mimics a saturated PTU) and `gpt-5-mini-tpm` (spillover). Because both deployments share a single endpoint, they map to one APIM backend and a native backend pool cannot tell them apart — so failover is handled **inside the APIM policy**:
+`gpt-5-mini` is deployed **twice on the same `foundry2` Foundry resource** with distinct deployment names: `gpt-5-mini-ptu` (mimics a saturated PTU) and `gpt-5-mini-tpm` (spillover). Each is fronted by its own single-member backend pool — `gpt5mini-ptu-pool` and `gpt5mini-tpm-pool`, both pointing at `foundry2` — so the PTU and TPM paths are named, separately observable backends. Neither pool has a circuit breaker. Because both pools resolve to the same endpoint, the pool switch alone cannot select a deployment, so failover is handled **inside the APIM policy**:
 
-1. Every `gpt-5-mini` request is sent to `gpt-5-mini-ptu` first.
-2. On HTTP 429, a `<retry>` in the `<backend>` section rewrites the deployment to `gpt-5-mini-tpm` and re-sends the **same** request.
+1. Every `gpt-5-mini` request is sent to `gpt5mini-ptu-pool` / `gpt-5-mini-ptu` first.
+2. On HTTP 429, a `<retry>` in the `<backend>` section switches the selected backend to `gpt5mini-tpm-pool`, rewrites the deployment to `gpt-5-mini-tpm`, and re-sends the **same** request. No circuit breaker is involved — the retry names its target, so breaker state is never consulted (and a tripped breaker on a single-member pool would leave it with no routable member).
 3. Both request shapes are handled: the deployment id in the **URL path** (Chat Completions) and the `model` field in the **request body** (Responses API) are rewritten to the selected deployment on each attempt.
+4. The response carries `x-served-deployment`, `x-served-pool` and `x-served-attempts` so you can see which side served the call.
 
-Enabled by a `model` field in the deployment config (`name` = deployment name, `model` = underlying model) added to `modules/cognitive-services/v3/deployments.bicep`.
+Enabled by a `model` field in the deployment config (`name` = deployment name, `model` = underlying model) added to `modules/cognitive-services/v3/deployments.bicep`, plus the two pools in `backendPoolsConfig`.
 
-### Scenario 2 — backend-pool failover (two Foundry resources)
+### Scenario 3 — backend-pool failover (two Foundry resources)
 
 `gpt-5.4-mini` is deployed once on each of **two separate Foundry resources**, `foundry6` (priority 1) and `foundry7` (priority 2), grouped into a priority-based APIM pool (`gpt54mini-pool`). Each backend carries a circuit-breaker rule that trips on **one 429 within `PT1M`** and stays open for `PT1M`, with `acceptRetryAfter: true`. Traffic goes to `foundry6`; once its breaker opens, the pool falls through to `foundry7`.
 
@@ -152,7 +154,7 @@ Add a `<retry>` to the `<backend>` section. Microsoft's documented pattern names
 
 > **Retry and circuit breaker are complementary, not alternatives: retry recovers the in-flight request, the breaker protects the ones after it.** Retry alone keeps hitting a saturated backend on every call; the breaker alone sacrifices one request each time it opens or resets.
 
-**This lab omits the retry deliberately** so the 429 stays visible in the test loop and the contrast with Scenario 1 remains observable.
+**This lab omits the retry deliberately** so the 429 stays visible in the test loop and the contrast with Scenario 2 remains observable.
 
 ---
 
