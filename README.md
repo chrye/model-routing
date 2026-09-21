@@ -1,6 +1,6 @@
 # Model routing lab
 
-Routes inference requests through **Azure API Management** to several **Azure AI Foundry** and Azure OpenAI backends based on the requested model, and demonstrates two different spillover patterns. Everything runs from [model-routing.ipynb](model-routing.ipynb): one Bicep deployment provisions APIM, the backends, the model deployments, and the routing policy ([policy.xml](policy.xml)).
+Routes inference requests through **Azure API Management** to several **Azure AI Foundry** and Azure OpenAI backends based on the requested model, and demonstrates two different spillover patterns. Everything runs from [model-routing.ipynb](labs/model-routing/model-routing.ipynb): one Bicep deployment provisions APIM, the backends, the model deployments, and the routing policy ([policy.xml](labs/model-routing/policy.xml)).
 
 What it demonstrates:
 
@@ -42,7 +42,7 @@ flowchart LR
     end
 
     pool -->|primary| f6
-    pool -.->|429 spillover| f7
+    pool -.->|after breaker trips| f7
     f5 -.connection.-> f4
 ```
 
@@ -123,12 +123,27 @@ Support comes from `backendPoolsConfig` and a per-backend `circuitBreaker` flag 
 
 A circuit breaker is forward-looking, and an APIM pool has no automatic same-request failover. Microsoft documents only that lower-priority groups are used *"when all backends in higher priority groups are unavailable because circuit breaker rules are tripped"* — that is, on **subsequent** requests. With the bare `<forward-request />` this lab uses:
 
-1. Request *N* → pool → `foundry6` → **429**, which is what reaches the caller.
-2. The breaker opens for `PT1M`.
-3. Requests *N+1 …* skip `foundry6` and are served by `foundry7`.
-4. When the trip duration expires the circuit resets and `foundry6` is tried again — costing another request if it is still saturated.
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant A as APIM pool
+    participant P as foundry6 (priority 1)
+    participant S as foundry7 (priority 2)
 
-Related: when a breaker is open on a **standalone** backend (not in a pool), APIM returns `503 Service Unavailable` rather than the backend's own 429.
+    C->>A: Request N
+    A->>P: forward-request
+    P-->>A: 429
+    A-->>C: 429
+    Note over A,P: Breaker opens for PT1M — request N is not replayed
+    C->>A: Request N+1
+    A->>S: forward-request
+    S-->>A: 200
+    A-->>C: 200
+```
+
+When the trip duration expires the circuit resets and `foundry6` is tried again — costing another request if it is still saturated.
+
+Two related cases: a breaker open on a **standalone** backend (not in a pool) makes APIM return `503 Service Unavailable` instead of the backend's own 429; and because breaker state is per-gateway-instance and not synchronized, a few requests can still reach a backend just after it trips.
 
 #### Recovering that request in production
 
@@ -169,11 +184,11 @@ Add a `<retry>` to the `<backend>` section. Microsoft's documented pattern names
 
 ## Run the lab
 
-Open [model-routing.ipynb](model-routing.ipynb) and run the cells top to bottom (or **Run All**):
+Open [model-routing.ipynb](labs/model-routing/model-routing.ipynb) and run the cells top to bottom (or **Run All**):
 
 1. **Initialize** notebook variables (regions, models, pools).
 2. **Verify** the Azure CLI / subscription.
-3. **Deploy** the Bicep template ([main.bicep](main.bicep)) with the generated [params.json](params.json).
+3. **Deploy** the Bicep template ([main.bicep](labs/model-routing/main.bicep)) with the generated [params.json](labs/model-routing/params.json).
 4. **Get outputs** (APIM gateway URL + subscription key).
 5. **Test** both surfaces. The Chat Completions loop covers `gpt-4.1`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5.4-mini`, `gpt-5.6-terra`, `legacy-gpt-4o`; the Responses loop swaps `legacy-gpt-4o` for `gpt-5-pro`. Watch the returned model and `x-ms-region` to observe routing and spillover.
 
@@ -185,4 +200,4 @@ Open [model-routing.ipynb](model-routing.ipynb) and run the cells top to bottom 
 
 ### Clean up
 
-When finished, remove all deployed resources with the [clean-up-resources notebook](clean-up-resources.ipynb) to avoid charges.
+When finished, remove all deployed resources with the [clean-up-resources notebook](labs/model-routing/clean-up-resources.ipynb) to avoid charges.

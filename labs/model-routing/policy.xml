@@ -93,7 +93,7 @@
                       for Chat Completions and in the body "model" for the Responses API, so both are rewritten.
                  No circuit breaker is configured on either pool - the retry names its target explicitly. -->
             <when condition="@( ((string)context.Variables["requestedModel"] ?? string.Empty) == "gpt-5-mini")">
-                <retry condition="@(context.Response != null && context.Response.StatusCode == 429 && (int)context.Variables["miniAttempt"] < 2)" count="1" interval="0" first-fast-retry="true">
+                <retry condition="@(context.Response != null && context.Response.StatusCode == 429 && (int)context.Variables["miniAttempt"] < 2)" count="1" interval="1" first-fast-retry="true">
                     <set-variable name="miniAttempt" value="@((int)context.Variables["miniAttempt"] + 1)" />
                     <set-variable name="miniDeployment" value="@(((int)context.Variables["miniAttempt"]) == 1 ? "gpt-5-mini-ptu" : "gpt-5-mini-tpm")" />
                     <set-variable name="miniPool" value="@(((int)context.Variables["miniAttempt"]) == 1 ? "gpt5mini-ptu-pool" : "gpt5mini-tpm-pool")" />

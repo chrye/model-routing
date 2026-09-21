@@ -2,7 +2,7 @@
 
 The ways a PTU (Provisioned Throughput Unit) primary can spill over to a TPM (Standard / PayGo, token-per-minute) secondary that are worth actually considering, and which ones are worth demonstrating in this lab.
 
-> Status: working document. Scenarios 2 and 3 are implemented in [policy.xml](policy.xml) / [main.bicep](main.bicep); the rest are candidates. Behavioral claims about APIM and Foundry were checked against Microsoft Learn on 2026-09-17 and are linked inline.
+> Status: working document. Scenarios 2 and 3 are implemented in [policy.xml](labs/model-routing/policy.xml) / [main.bicep](labs/model-routing/main.bicep); the rest are candidates. Behavioral claims about APIM and Foundry were checked against Microsoft Learn on 2026-09-17 and are linked inline.
 >
 > The catalogue is curated, not exhaustive. Patterns that address a *different* problem — gateway HA via Front Door, weighted blue/green pools — are deliberately excluded or demoted to [§5](#5-cross-cutting-concerns) so that every numbered scenario is a genuine alternative to the others.
 

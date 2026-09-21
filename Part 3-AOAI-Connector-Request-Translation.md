@@ -66,7 +66,7 @@ POST https://foundry5-xxxx.services.ai.azure.com/api/projects/<p>/openai/v1/resp
 { "model": "legacy-gpt-4o" }     →  404  (with a correctly-scoped ai.azure.com token)
 ```
 
-`foundry5` has no deployments at all ([foundry5-connected-openai.bicep](foundry5-connected-openai.bicep)).
+`foundry5` has no deployments at all ([foundry5-connected-openai.bicep](labs/model-routing/foundry5-connected-openai.bicep)).
 Adding the connection did not import `legacy-gpt-4o` into its namespace — on either endpoint.
 
 ### How this was proven
@@ -115,7 +115,7 @@ client = AzureOpenAI(azure_endpoint=f"{gateway}/inference", api_key=..., api_ver
 ```
 
 > **Which API surface does this lab actually use for `legacy-gpt-4o`?** **Chat Completions**, not Responses.
-> [model-routing.ipynb](model-routing.ipynb#L343) states it outright: *"The legacy `gpt-4o` compatibility
+> [model-routing.ipynb](labs/model-routing/model-routing.ipynb#L343) states it outright: *"The legacy `gpt-4o` compatibility
 > route is exercised through Chat Completions above."* The Chat Completions loop includes `legacy-gpt-4o`;
 > the Responses loop deliberately omits it.
 
@@ -146,16 +146,16 @@ For Responses the deployment name is carried by the **body `model` field only** 
 ### Hop 2 — APIM policy resolution
 
 The APIM API is imported from a **wildcard** `/*` passthrough spec
-([PassThrough.json](../../modules/apim/v3/specs/PassThrough.json)), which declares no named template
+([PassThrough.json](modules/apim/v3/specs/PassThrough.json)), which declares no named template
 parameters. Therefore `context.Request.MatchedParameters["deployment-id"]` can **never** be populated — for
-either API surface. The first branch of [policy.xml](policy.xml#L6) is effectively dead code in this lab, and
+either API surface. The first branch of [policy.xml](labs/model-routing/policy.xml#L6) is effectively dead code in this lab, and
 `requestedModel` **always** falls through to the body `model`:
 
 - `deployment` → empty (no route param)
 - `model` → `legacy-gpt-4o` (parsed from `reqBody` with `preserveContent: true`)
 - `requestedModel` → `legacy-gpt-4o`
 
-It then hits the legacy branch at [policy.xml](policy.xml#L53):
+It then hits the legacy branch at [policy.xml](labs/model-routing/policy.xml#L53):
 
 ```xml
 <when condition="...== &quot;legacy-gpt-4o&quot;">
@@ -174,7 +174,7 @@ lab where genuine translation happens (path *and* body rewriting for PTU→TPM s
 ### Hop 3 — APIM → classic account
 
 With `inferenceAPIType = 'PassThrough'`, `endpointPath` is empty, so the backend URL in
-[inference-api.bicep](../../modules/apim/v3/inference-api.bicep#L124) is the bare account root and the
+[inference-api.bicep](modules/apim/v3/inference-api.bicep#L124) is the bare account root and the
 wildcard spec appends the remaining path verbatim:
 
 ```http
@@ -216,10 +216,10 @@ This is the substantive conversion, and it's done by APIM, not the connector.
 | APIM → classic account | `Authorization: Bearer <Entra token>`, minted from APIM's managed identity via the backend's `credentials.managedIdentity.resource` |
 
 APIM swaps an APIM subscription key for an Entra bearer token. That swap is **mandatory** here: the classic
-account sets `disableLocalAuth: true` ([legacy-hub-openai.bicep](legacy-hub-openai.bicep#L77)), so key auth
+account sets `disableLocalAuth: true` ([legacy-hub-openai.bicep](labs/model-routing/legacy-hub-openai.bicep#L77)), so key auth
 is dead and every path to it must be Entra-based. The RBAC that makes it work is the
 `Cognitive Services OpenAI User` assignment to the APIM principal at
-[legacy-hub-openai.bicep](legacy-hub-openai.bicep#L157).
+[legacy-hub-openai.bicep](labs/model-routing/legacy-hub-openai.bicep#L157).
 
 ⚠️ **`Cognitive Services Contributor` cannot make inference calls with Entra ID**, despite the name sounding
 more powerful. `Cognitive Services OpenAI User` (`5e0bd9bd-…`) is the correct minimum — which is what the
@@ -304,7 +304,7 @@ There are actually **two** connections in this lab, and they're different resour
 |---|---|---|
 | Type | `MachineLearningServices/workspaces/connections` | `CognitiveServices/accounts/projects/connections` |
 | Parent | the Hub | the foundry5 project |
-| File | [legacy-hub-openai.bicep](legacy-hub-openai.bicep#L139) | [foundry5-connected-openai.bicep](foundry5-connected-openai.bicep#L70) |
+| File | [legacy-hub-openai.bicep](labs/model-routing/legacy-hub-openai.bicep#L139) | [foundry5-connected-openai.bicep](labs/model-routing/foundry5-connected-openai.bicep#L70) |
 
 Both are `category: AzureOpenAI`, `authType: AAD`, and both point `target` at the same classic endpoint.
 Both do the same class of job — all of it **control plane**:
@@ -379,7 +379,7 @@ Verified points:
 
 ## Appendix — how this was verified
 
-Two cells in [model-routing.ipynb](model-routing.ipynb) exercise every claim in this document.
+Two cells in [model-routing.ipynb](labs/model-routing/model-routing.ipynb) exercise every claim in this document.
 
 **Cell A — direct vs. APIM, against the classic account:**
 
