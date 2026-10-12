@@ -1,6 +1,6 @@
 # Part 2 — PTU → TPM failover options
 
-The ways a PTU (Provisioned Throughput Unit) primary can spill over to a TPM (Standard / PayGo, token-per-minute) secondary that are worth actually considering, and which ones are worth demonstrating in this sample.
+The ways a PTU (Provisioned Throughput Unit) primary can spill over to a TPM (Standard / PayGo, token-per-minute) secondary that are worth actually considering.
 
 > Status: working document. Scenarios 2 and 3 are implemented in [policy.xml](labs/model-routing/policy.xml) / [main.bicep](labs/model-routing/main.bicep); the rest are candidates. Behavioral claims about APIM and Foundry were checked against Microsoft Learn on 2026-10-12 and are linked inline.
 >
