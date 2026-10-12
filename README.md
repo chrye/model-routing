@@ -1,4 +1,4 @@
-# Model routing lab
+# Model Routing Deep Dive
 
 Routes inference requests through **Azure API Management** to several **Azure AI Foundry** and Azure OpenAI backends based on the requested model, and demonstrates two different spillover patterns. Everything runs from [model-routing.ipynb](labs/model-routing/model-routing.ipynb): one Bicep deployment provisions APIM, the backends, the model deployments, and the routing policy ([policy.xml](labs/model-routing/policy.xml)).
 
@@ -89,7 +89,7 @@ The API is deployed as a **pass-through** API (`inferenceAPIType = "PassThrough"
 
 ## Spillover patterns
 
-Both scenarios do the same thing — the primary saturates, traffic overflows to a secondary. They differ in where the failover happens. Numbering matches the catalogue in [Part 2 — PTU → TPM failover options](<Part 2-PTU-to-TPM-Failover-Options.md>); Scenario 1 there is Foundry's platform-native spillover, which this lab cannot demonstrate without real provisioned capacity.
+Both scenarios do the same thing — the primary saturates, traffic overflows to a secondary. They differ in where the failover happens. Numbering matches the catalogue in [Part 2 — PTU → TPM failover options](<Part 2-PTU-to-TPM-Failover-Options.md>); Scenario 1 there is Foundry's platform-native spillover, which this sample cannot demonstrate without real provisioned capacity.
 
 | | Scenario 2 — one resource | Scenario 3 — two resources |
 |---|---|---|
@@ -121,7 +121,7 @@ Support comes from `backendPoolsConfig` and a per-backend `circuitBreaker` flag 
 
 #### The request that trips the breaker is not recovered
 
-A circuit breaker is forward-looking, and an APIM pool has no automatic same-request failover. Microsoft documents only that lower-priority groups are used *"when all backends in higher priority groups are unavailable because circuit breaker rules are tripped"* — that is, on **subsequent** requests. With the bare `<forward-request />` this lab uses:
+A circuit breaker is forward-looking, and an APIM pool has no automatic same-request failover. Microsoft documents only that lower-priority groups are used *"when all backends in higher priority groups are unavailable because circuit breaker rules are tripped"* — that is, on **subsequent** requests. With the bare `<forward-request />` this sample uses:
 
 ```mermaid
 sequenceDiagram
@@ -169,7 +169,7 @@ Add a `<retry>` to the `<backend>` section. Microsoft's documented pattern names
 
 > **Retry and circuit breaker are complementary, not alternatives: retry recovers the in-flight request, the breaker protects the ones after it.** Retry alone keeps hitting a saturated backend on every call; the breaker alone sacrifices one request each time it opens or resets.
 
-**This lab omits the retry deliberately** so the 429 stays visible in the test loop and the contrast with Scenario 2 remains observable.
+**This sample omits the retry deliberately** so the 429 stays visible in the test loop and the contrast with Scenario 2 remains observable.
 
 ---
 
