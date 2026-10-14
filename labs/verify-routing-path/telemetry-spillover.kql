@@ -65,15 +65,36 @@ AppTraces
     StatusReturnedToCaller = tostring(Properties["status_code"])
 | order by Requests desc
 
-// 2b. The same, request by request. Each row is one request: the PTU said 429, the spillover deployment answered with 200.
+// 2b. The same, request by request. Every two row are one request (start/complete pair). Usually the PTU said 429 and the spillover deployment answered with 200.
+//     A request the PTU answered itself shows PtuDeployment "none" and AnsweredBy "not-reported".
+AppTraces
+| where TimeGenerated > ago(1h)
+//| where Message == "routing-attempt-complete"
+| where tostring(Properties["client_request_id"]) startswith "spill-"
+| project
+    Message,
+    TimeGenerated,
+    RequestId = tostring(Properties["client_request_id"]),
+    Backend = extract(@"(route-backend-\d)", 1, tostring(Properties["request_host"])),
+    PtuDeployment = tostring(Properties["spillover_from"]),
+    PtuReturnedStatus = tostring(Properties["spillover_error"]),
+    AnsweredBy = tostring(Properties["served_deployment"]),
+    StatusReturnedToCaller = tostring(Properties["status_code"]),
+    Attempt = toint(Properties["attempt"])
+| order by RequestId, TimeGenerated asc
+
+// 2c. Only the requests that went to the PTU first and were actually served by the spillover deployment.
+//     Each row is one such request: the PTU returned 429 (PtuReturnedStatus), the spillover deployment answered
+//     (AnsweredBy), and the caller got a 200 after a single APIM attempt. Requests the PTU answered itself are left out.
+//     To follow one request, add: | where RequestId == "spill-<Spillover request ID>"
 AppTraces
 | where TimeGenerated > ago(10m)
 | where Message == "routing-attempt-complete"
 | where tostring(Properties["client_request_id"]) startswith "spill-"
+| where tostring(Properties["spillover_from"]) != "none"
 | project
     TimeGenerated,
     RequestId = tostring(Properties["client_request_id"]),
-    Backend = extract(@"(route-backend-\d)", 1, tostring(Properties["request_host"])),
     PtuDeployment = tostring(Properties["spillover_from"]),
     PtuReturnedStatus = tostring(Properties["spillover_error"]),
     AnsweredBy = tostring(Properties["served_deployment"]),
@@ -110,3 +131,7 @@ AppDependencies
     Http5xx = countif(toint(ResultCode) >= 500),
     NoResponse = countif(isempty(ResultCode))
     by Backend = extract(@"(route-backend-\d)", 1, Target)
+
+
+AppTraces 
+| where tostring(Properties["client_request_id"]) == "spill-…"

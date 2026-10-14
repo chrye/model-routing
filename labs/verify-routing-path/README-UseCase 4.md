@@ -69,7 +69,30 @@ In the notebook, set `phases = "4"` in the **Send traffic** cell. From the comma
 
 `-SpilloverRounds` (default 3) is how many times to saturate the PTU, and `-SpilloverRequestsPerRound` (default 12) is how many small requests to send through APIM each time. Phase 4 runs only when the `FOUNDRY_PRIME_TARGETS` environment variable has an entry for backend 4. The notebook sets it for you. It is a JSON array of `{ name, endpoint, token }`, and it uses an Entra ID token because key-based authentication may be disabled on the account. Phase 4 does not touch the pool or its circuit breakers, so it can run at any time.
 
-Each round saturates backend 4's PTU directly, probes until the PTU reports saturation, and then sends the small requests through APIM. A typical result is every request served by the spillover deployment, zero `429`s, zero APIM retries, and under a thousand spillover tokens used:
+### What each round does
+
+Rounds 1, 2 and 3 are identical repeats, not different steps. Each round runs this sequence:
+
+1. **Saturate the PTU.** A background job sends 6 large, unique prompts in parallel straight to backend 4's Foundry endpoint (`-PrimeRequestsPerBackend`, default 6; `-PrimePromptRepeat`, default 15000 repeats of a sentence). They bypass APIM, so they stand in for the PTU's other consumers.
+2. **Confirm saturation.** For up to 25 seconds, the script sends a tiny direct request ("Reply with only the word ok.") every 250 ms. As soon as one comes back with the `x-ms-spillover-from-deployment` header, the PTU is confirmed full. The script logs how many seconds that took, or `PTU did not saturate` if it never happened. The probes use almost none of the spillover quota.
+3. **Send the requests under test.** With the PTU full, the script sends 12 small requests concurrently through APIM, each with its own `spill-<guid>` ID in the `x-client-request-id` header.
+4. **Tally the round.** It waits for the priming job to finish, then counts the APIM requests served by spillover, served by the PTU, and rejected with a `429`.
+
+Between rounds it waits 5 seconds so the PTU can drain before the next one.
+
+Several rounds are used because the PTU saturates a few seconds after the priming starts, so a single round could miss the window. Three rounds send 36 requests (3 × 12) through APIM and show that the behavior is consistent, not a one-off.
+
+The round summary lines come from a real run. Each shows when the PTU saturated, what the direct priming requests returned, and how the APIM requests were served:
+
+```text
+  Round 1: PTU saturated after 5.2 s; priming responses [3 x 200, 3 x 429]. Through APIM: 12 served by spillover, 0 by the PTU, 0 x 429
+  Round 2: PTU saturated after 3.1 s; priming responses [6 x 429]. Through APIM: 5 served by spillover, 7 by the PTU, 0 x 429
+  Round 3: PTU saturated after 6.2 s; priming responses [1 x 200, 5 x 429]. Through APIM: 12 served by spillover, 0 by the PTU, 0 x 429
+```
+
+Rounds can differ. In round 2 above, 7 of the 12 requests were served by the PTU itself. The PTU's headroom changes second by second as the priming requests finish, so some requests can land while it has capacity. That is why the script uses several rounds, and why the proof is the per-request `x-ms-spillover-from-deployment` header, not the round's saturation message. Either way, there are no `429`s and no APIM retries.
+
+After the last round the script prints the combined results. In most runs every request is served by the spillover deployment, with zero `429`s, zero APIM retries, and under a thousand spillover tokens used. In 4 of the 5 runs checked, all 36 requests spilled over:
 
 ```text
 Phase 4 results (36 requests through APIM to backend 4):
@@ -80,19 +103,32 @@ Phase 4 results (36 requests through APIM to backend 4):
   Spillover tokens used: 864
 ```
 
+Occasionally some requests are served by the PTU itself, as in round 2 above. That run's totals were:
+
+```text
+Phase 4 results (36 requests through APIM to backend 4):
+   29  200 served by the Foundry spillover deployment (gpt-5-mini-ptu -> gpt-5-mini-ptu-spillover)
+    7  200 served by the PTU deployment
+    0  429 (spillover quota exhausted)
+  APIM retries: 0 (every request was a single APIM attempt)
+  Spillover tokens used: 696
+```
+
+Both outcomes are correct. The script counts a request as spilled over only when the response carries Foundry's `x-ms-spillover-from-deployment` header, and APIM's telemetry for the same requests agrees with the script's counts. The `0 PTU` result is the usual one because the script sends the requests under test only after it has seen the PTU saturate, so they normally arrive while it is still full.
+
 ## What the telemetry shows
 
 Run [telemetry-spillover.kql](telemetry-spillover.kql) in the Log Analytics workspace, not the Application Insights resource (see [README.md](README.md#read-the-telemetry)). It needs no request ID: it reads every request whose ID starts with `spill-`. Widen or narrow the `2h` window in the queries to match when you ran the demo.
 
-In a typical run, every request under test is rejected by the PTU, served by the spillover deployment, and returned to the caller as a `200`:
+In most runs, every request under test is rejected by the PTU, served by the spillover deployment, and returned to the caller as a `200`. If a round shows some requests served by the PTU itself, those rows have `served_deployment` of `not-reported` and `spillover_from` of `none` in the trace. Query 2a counts them as `gpt-5-mini-ptu (the PTU itself)`, and query 0 shows `ServedBySpillover` lower than `Requests`. The three answers below then apply to the requests that spilled over:
 
 | Question | Where the proof is |
 |---|---|
 | 1. The PTU was exhausted | Per request, Foundry's `x-ms-spillover-error: 429` header says the provisioned deployment returned 429 (query 1a). Azure Monitor shows the rejections per minute (query 1b). |
-| 2. Served by the spillover | `x-ms-deployment-name` names `gpt-5-mini-ptu-spillover`, and the caller got a `200` (queries 2a and 2b). |
+| 2. Served by the spillover | `x-ms-deployment-name` names `gpt-5-mini-ptu-spillover`, and the caller got a `200` (queries 2a, 2b and 2c). |
 | 3. APIM did nothing | One attempt per request (query 3a), and APIM's own dependency telemetry shows backend 4 returning only `200`s and no `429` (query 3b). |
 
-Query 0 is a one-row scorecard of all three. Query 2b lists the requests one by one, and query 3b has a `NoResponse` column that counts calls that never completed, so the numbers add up.
+Query 0 is a one-row scorecard of all three. Query 2b lists every request one by one, and query 2c lists only the requests that went to the PTU first and were served by the spillover deployment. Query 3b has a `NoResponse` column that counts calls that never completed, so the numbers add up.
 
 Query 1b also shows the platform utilization metrics. In this lab the legacy `AzureOpenAIProvisionedManagedUtilization` metric rose above 100% during the burst, while the recommended V2 metric peaked lower, so treat the per-request header in 1a as the authoritative proof of exhaustion.
 

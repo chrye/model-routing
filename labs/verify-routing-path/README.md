@@ -99,7 +99,7 @@ In the notebook, set `phases` in the **Send traffic** cell (for example `"2"`, `
 
 1. **Weighted baseline** (`-WeightedRequestCount`, default 200): small requests, 8 at a time. This is where the 53/47 split shows up.
 2. **Pressure burst through APIM** (`-PressureRequestCount`, default 16; `-SmallRequestCount`, default 24): large unique prompts of roughly 90K tokens saturate both PTUs, with small requests spread across the first seconds. Unique prompt prefixes stop prompt caching from discounting the PTU load. The prompts consume PTU capacity, not extra per-token charges; only requests that spill to or fall back to a TPM deployment are billed per token, and the oversized ones are rejected there. This shows the organic mix of outcomes. The run prints a `Traveler request ID` if a request completed backend 1 -> 2 -> 3 with a `200`. Whenever a request used all of its attempts and still got a `429`, it also prints a `Rejected request ID`, which you can paste into [telemetry.kql](telemetry.kql) to see each backend that request tried.
-3. **Guaranteed traveler** (`-TravelerCycles`, default 6): a request can only walk backend 1, 2, then 3 when both PTUs are saturated and neither circuit breaker has tripped. Overload sent through APIM trips the breakers, so this phase saturates both PTUs **directly**, bypassing APIM, like another consumer of the same Foundry resources. It probes until both PTUs report saturation, then sends one tracer through APIM. The tracer reserves 2,000 tokens, which exceeds the 1K-TPM spillover quota, so native spillover cannot rescue it. The phase repeats until a tracer walks backend 1 -> 2 -> 3, because the first hop is weighted and a tracer can also walk 2 -> 1 -> 3.
+3. **Guaranteed traveler** (`-TravelerCycles`, default 6): a request can only walk backend 1, 2, then 3 when both PTUs are saturated and neither circuit breaker has tripped. Overload sent through APIM trips the breakers, so this phase saturates both PTUs **directly**, bypassing APIM, like another consumer of the same Foundry resources. It probes until both PTUs report saturation, then sends one tracer through APIM. The tracer reserves 2,000 tokens, which exceeds the 1K-TPM spillover quota, so native spillover cannot rescue it. The phase repeats until a tracer walks backend 1 -> 2 -> 3, because the first hop is weighted and a tracer can also walk 2 -> 1 -> 3. See [What each phase 3 cycle does](#what-each-phase-3-cycle-does).
 
 4. **Spillover demo on backend 4:** PTU to Foundry-native spillover on a separate backend, outside the pool. See [README-UseCase 4.md](<README-UseCase 4.md>).
 
@@ -128,6 +128,39 @@ Traveler request ID: tracer-7d2faaa7-43e9-4c10-a29d-b9836167d34c
 ```
 
 Counts and the number of Phase 3 cycles vary between runs.
+
+### What each phase 3 cycle does
+
+Every cycle is an identical, independent attempt to get one request to walk backend 1, 2, then 3. A request only does that when both PTUs are saturated at the moment it arrives and neither circuit breaker has tripped. A PTU stays saturated for only a few seconds and the first hop is weighted, so one attempt often misses. That is why the phase repeats, up to `-TravelerCycles` times (default 6). A cycle runs this sequence:
+
+1. **Wait for the circuit breakers to reset.** The script sleeps 45 s so the breakers tripped by the previous cycle close again. It does this before every cycle after the first, and before the first cycle too when phase 2 ran in the same invocation.
+2. **Saturate both PTUs directly.** A background job sends large, unique prompts straight to the Foundry accounts of backends 1 and 2 (`-PrimeRequestsPerBackend`, default 6 per backend, so 12 in total; `-PrimePromptRepeat`, default 15000 repeats of a sentence). They bypass APIM, so APIM's breakers stay closed. They stand in for other consumers of the same PTUs.
+3. **Confirm both are saturated.** For up to 25 seconds, the script sends a tiny direct request to each backend every 250 ms. A PTU is saturated when its probe comes back with the `x-ms-spillover-from-deployment` header. The script logs how many seconds until both were, or `PTUs did not both saturate`.
+4. **Send one tracer through APIM.** The tracer carries a `tracer-<guid>` ID and reserves 2,000 tokens, which exceeds the 1K-TPM spillover quota, so native spillover cannot rescue it. If a PTU rejects it, APIM has to retry on another backend.
+5. **Log the cycle and decide whether to continue.** The script waits for the priming job, prints one `Cycle` line with the priming statuses and the tracer's `x-routing-path`, and then checks the path:
+
+| Tracer result | What it means | What the script does |
+|---|---|---|
+| `backend 1 -> 2 -> 3`, status `200` | The ideal full walk | Stops. This is the `Traveler request ID`. |
+| Three hops in another order, such as `backend 2 -> 1 -> 3`, status `200` | A full walk, but through the other weighted first hop | Keeps it as a fallback and continues with the next cycle. |
+| One or two hops, such as `backend 2` | The PTU had headroom when the tracer arrived, or a breaker was already open, so APIM did not walk the whole pool | Continues with the next cycle. |
+| Any status other than `200` | Not a usable traveler | Continues with the next cycle. |
+
+After the last cycle, the script uses the ideal tracer if it found one, or else the first fallback. If neither was found, it says so and suggests waiting about a minute before running again.
+
+The first four cycles of one run show how this plays out. Cycles 1 to 3 were served by backend 2 alone, and cycle 4 walked all three backends, but in the order 2 -> 1 -> 3, so the phase kept going:
+
+```text
+  Cycle 1: both PTUs saturated after 7.7 s; priming responses [6 x 200, 6 x 429]. Tracer: backend 2, status 200
+  Waiting 45 s for the circuit breakers to reset...
+  Cycle 2: both PTUs saturated after 9.8 s; priming responses [4 x 200, 8 x 429]. Tracer: backend 2, status 200
+  Waiting 45 s for the circuit breakers to reset...
+  Cycle 3: both PTUs saturated after 6.9 s; priming responses [4 x 200, 8 x 429]. Tracer: backend 2, status 200
+  Waiting 45 s for the circuit breakers to reset...
+  Cycle 4: both PTUs saturated after 7.2 s; priming responses [7 x 200, 5 x 429]. Tracer: backend 2 -> backend 1 -> backend 3, status 200
+```
+
+The `429`s in the priming responses are the PTUs rejecting the direct traffic. Because the priming bypasses APIM, they never trip an APIM breaker.
 
 ## Read the telemetry
 
