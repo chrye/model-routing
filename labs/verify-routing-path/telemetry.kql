@@ -1,0 +1,85 @@
+// Run these in the Log Analytics WORKSPACE (workspace-<suffix>, shown by the notebook), not in the Application Insights
+// resource: Azure portal > Log Analytics workspaces > your workspace > Logs. Select one query at a time and press Run.
+// The workspace uses the table names AppTraces and AppDependencies. The Application Insights Logs blade uses the older
+// names traces and dependencies, so these queries fail there with "cannot find table AppTraces".
+// The gateway policy writes one "routing-attempt-complete" trace per APIM attempt at a backend,
+// tagged with the x-client-request-id of the call. request_host identifies the backend that answered.
+
+// 1. Journey of one request. Paste the "Traveler request ID" printed by invoke-lab.ps1.
+//    A traveler looks like: attempt 1 backend 1 = 429, attempt 2 backend 2 = 429, attempt 3 backend 3 = 200.
+//    A 429 whose ServedDeployment is gpt-5-mini-spillover shows native PTU -> TPM spillover happened
+//    inside Foundry, without an extra APIM attempt, and that the spillover deployment was exhausted too.
+let requestId = "REPLACE-ME";
+AppTraces
+| where TimeGenerated > ago(10m)
+| where Message == "routing-attempt-complete"
+| where tostring(Properties["client_request_id"]) == requestId
+| project
+    TimeGenerated,
+    Attempt = toint(Properties["attempt"]),
+    Backend = extract(@"(route-backend-\d)", 1, tostring(Properties["request_host"])),
+    StatusCode = toint(Properties["status_code"]),
+    ServedDeployment = tostring(Properties["served_deployment"]),
+    SpilloverFrom = tostring(Properties["spillover_from"]),
+    SpilloverError = tostring(Properties["spillover_error"]),
+    RetryAfterSeconds = tostring(Properties["retry_after"]),
+    OperationId
+| order by Attempt asc
+
+// UC-1. First-hop split of the weighted baseline. Expect about 53% / 47% over a few hundred requests.
+//    Short sequential runs from one client can look lopsided; the weights hold in aggregate.
+AppTraces
+| where TimeGenerated > ago(10m)
+| where Message == "routing-attempt-complete"
+| where tostring(Properties["client_request_id"]) startswith "weighted-"
+| where toint(Properties["attempt"]) == 1
+| where isnotempty(tostring(Properties["request_host"]))
+| summarize Requests = count() by Backend = extract(@"(route-backend-\d)", 1, tostring(Properties["request_host"]))
+| as FirstHop
+| extend Percent = round(100.0 * Requests / toscalar(FirstHop | summarize sum(Requests)), 1)
+| order by Backend asc
+
+// UC-2. Every distinct path taken by the pressure burst, e.g. "b1:429 > b2:200" or "b1:429 > b2:429 > b3:200".
+AppTraces
+| where TimeGenerated > ago(10m)
+| where Message == "routing-attempt-complete"
+| extend RequestId = tostring(Properties["client_request_id"])
+| where RequestId startswith "pressure-" or RequestId startswith "small-" or RequestId startswith "tracer-"
+| extend
+    Attempt = toint(Properties["attempt"]),
+    Backend = extract(@"route-backend-(\d)", 1, tostring(Properties["request_host"])),
+    StatusCode = tostring(Properties["status_code"])
+| order by RequestId asc, Attempt asc
+| summarize Path = strcat_array(make_list(strcat("b", Backend, ":", StatusCode)), " > ") by RequestId
+| summarize Requests = count(), ExampleRequestId = any(RequestId) by Path
+| order by Requests desc
+
+// 4. Native spillover seen by APIM: attempts where Foundry answered from the spillover deployment.
+//    StatusCode 200 here is a request saved by spillover; 429 means the spillover was exhausted too.
+AppTraces
+| where TimeGenerated > ago(10m)
+| where Message == "routing-attempt-complete"
+| where tostring(Properties["spillover_from"]) != "none"
+| summarize Attempts = count() by
+    Backend = extract(@"(route-backend-\d)", 1, tostring(Properties["request_host"])),
+    StatusCode = tostring(Properties["status_code"]),
+    ServedDeployment = tostring(Properties["served_deployment"])
+| order by Backend asc, StatusCode asc
+
+// 5. Independent view from APIM's own dependency telemetry for one request: one row per backend call.
+let requestId = "REPLACE-ME";
+let operations = AppTraces
+    | where TimeGenerated > ago(10m)
+    | where Message == "routing-request-start"
+    | where tostring(Properties["client_request_id"]) == requestId
+    | distinct OperationId;
+AppDependencies
+| where TimeGenerated > ago(10m)
+| where OperationId in (operations)
+| project
+    TimeGenerated,
+    Backend = extract(@"(route-backend-\d)", 1, Target),
+    ResultCode,
+    Success,
+    DurationMs
+| order by TimeGenerated asc

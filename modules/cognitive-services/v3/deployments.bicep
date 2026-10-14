@@ -28,6 +28,9 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-
       version: model.version
     }
     raiPolicyName: 'Microsoft.DefaultV2'
+    ...(empty(model.?spilloverDeploymentName ?? '') ? {} : {
+      spilloverDeploymentName: model.spilloverDeploymentName
+    })
   }
 }]
 

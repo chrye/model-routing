@@ -1,0 +1,125 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "apimSku": {
+      "value": "Basicv2"
+    },
+    "aiServicesConfig": {
+      "value": [
+        {
+          "name": "route-backend-1",
+          "location": "eastus2",
+          "circuitBreaker": true
+        },
+        {
+          "name": "route-backend-2",
+          "location": "swedencentral",
+          "circuitBreaker": true
+        },
+        {
+          "name": "route-backend-3",
+          "location": "eastus2"
+        },
+        {
+          "name": "route-backend-4",
+          "location": "eastus2"
+        }
+      ]
+    },
+    "modelsConfig": {
+      "value": [
+        {
+          "name": "gpt-5-mini-spillover",
+          "model": "gpt-5-mini",
+          "publisher": "OpenAI",
+          "version": "2025-08-07",
+          "sku": "GlobalStandard",
+          "capacity": 1,
+          "aiservice": "route-backend-1"
+        },
+        {
+          "name": "gpt-5-mini",
+          "model": "gpt-5-mini",
+          "publisher": "OpenAI",
+          "version": "2025-08-07",
+          "sku": "GlobalProvisionedManaged",
+          "capacity": 15,
+          "spilloverDeploymentName": "gpt-5-mini-spillover",
+          "aiservice": "route-backend-1"
+        },
+        {
+          "name": "gpt-5-mini-spillover",
+          "model": "gpt-5-mini",
+          "publisher": "OpenAI",
+          "version": "2025-08-07",
+          "sku": "GlobalStandard",
+          "capacity": 1,
+          "aiservice": "route-backend-2"
+        },
+        {
+          "name": "gpt-5-mini",
+          "model": "gpt-5-mini",
+          "publisher": "OpenAI",
+          "version": "2025-08-07",
+          "sku": "GlobalProvisionedManaged",
+          "capacity": 15,
+          "spilloverDeploymentName": "gpt-5-mini-spillover",
+          "aiservice": "route-backend-2"
+        },
+        {
+          "name": "gpt-5-mini",
+          "model": "gpt-5-mini",
+          "publisher": "OpenAI",
+          "version": "2025-08-07",
+          "sku": "GlobalStandard",
+          "capacity": 20,
+          "aiservice": "route-backend-3"
+        },
+        {
+          "name": "gpt-5-mini-ptu-spillover",
+          "model": "gpt-5-mini",
+          "publisher": "OpenAI",
+          "version": "2025-08-07",
+          "sku": "GlobalStandard",
+          "capacity": 50,
+          "aiservice": "route-backend-4"
+        },
+        {
+          "name": "gpt-5-mini-ptu",
+          "model": "gpt-5-mini",
+          "publisher": "OpenAI",
+          "version": "2025-08-07",
+          "sku": "GlobalProvisionedManaged",
+          "capacity": 15,
+          "spilloverDeploymentName": "gpt-5-mini-ptu-spillover",
+          "aiservice": "route-backend-4"
+        }
+      ]
+    },
+    "backendPoolsConfig": {
+      "value": [
+        {
+          "name": "routing-pool",
+          "description": "Priority 1: backend 1 (weight 53) and backend 2 (weight 47). Priority 2: backend 3, used only while both priority-1 circuit breakers are tripped.",
+          "services": [
+            {
+              "backend": "route-backend-1",
+              "priority": 1,
+              "weight": 53
+            },
+            {
+              "backend": "route-backend-2",
+              "priority": 1,
+              "weight": 47
+            },
+            {
+              "backend": "route-backend-3",
+              "priority": 2
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

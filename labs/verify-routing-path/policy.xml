@@ -1,0 +1,89 @@
+<policies>
+    <inbound>
+        <base />
+        <set-variable name="clientRequestId" value="@(context.Request.Headers.GetValueOrDefault(&quot;x-client-request-id&quot;, context.RequestId.ToString()))" />
+        <set-variable name="attempt" value="@(0)" />
+        <!--
+          The model named in the request body decides the route.
+          gpt-5-mini-ptu  -> backend 4, a single 15-PTU deployment with Foundry-native spillover. It is outside the pool:
+                             no circuit breaker, and APIM never retries it, so any spillover is Foundry's doing alone.
+          anything else   -> routing-pool: backend 1 (priority 1, weight 53), backend 2 (priority 1, weight 47),
+                             backend 3 (priority 2). Backends 1 and 2 carry a circuit breaker that trips on a 429, and
+                             APIM only uses priority 2 while every priority-1 backend is tripped.
+          Every pooled backend exposes the same deployment name, so the request body is never rewritten.
+        -->
+        <set-variable name="requestedModel" value="@{
+            var body = context.Request.Body?.As&lt;JObject&gt;(preserveContent: true);
+            return body == null ? string.Empty : ((string)body[&quot;model&quot;] ?? string.Empty);
+        }" />
+        <choose>
+            <when condition="@((string)context.Variables[&quot;requestedModel&quot;] == &quot;gpt-5-mini-ptu&quot;)">
+                <set-variable name="pooled" value="@(false)" />
+                <set-backend-service backend-id="route-backend-4" />
+            </when>
+            <otherwise>
+                <set-variable name="pooled" value="@(true)" />
+                <set-backend-service backend-id="routing-pool" />
+            </otherwise>
+        </choose>
+        <trace source="verify-routing-path" severity="information">
+            <message>routing-request-start</message>
+            <metadata name="client_request_id" value="@((string)context.Variables[&quot;clientRequestId&quot;])" />
+        </trace>
+    </inbound>
+    <backend>
+        <!--
+          A 200 from a PTU deployment is returned as-is. A PTU 429 never reaches APIM: Foundry spills it
+          to the TPM deployment on the same resource (spilloverDeploymentName). APIM only sees a 429 when
+          that spillover is exhausted too. The backend's breaker then trips, and the retry re-forwards to
+          the pool, which skips tripped backends: the other priority-1 backend first, then backend 3.
+          Backend 4 is never retried (pooled = false).
+        -->
+        <retry condition="@(context.Response != null &amp;&amp; context.Response.StatusCode == 429 &amp;&amp; (bool)context.Variables[&quot;pooled&quot;])"
+               count="2"
+               interval="1"
+               first-fast-retry="true">
+            <set-variable name="attempt" value="@((int)context.Variables[&quot;attempt&quot;] + 1)" />
+            <forward-request timeout="120" buffer-request-body="true" />
+            <set-variable name="path" value="@{
+                var match = System.Text.RegularExpressions.Regex.Match(context.Request.Url.Host, &quot;route-backend-[0-9]&quot;);
+                var name = match.Success ? match.Value : context.Request.Url.Host;
+                var path = (string)context.Variables.GetValueOrDefault(&quot;path&quot;, &quot;&quot;);
+                return path == &quot;&quot; ? name : path + &quot;&gt;&quot; + name;
+            }" />
+            <trace source="verify-routing-path" severity="information">
+                <message>routing-attempt-complete</message>
+                <metadata name="client_request_id" value="@((string)context.Variables[&quot;clientRequestId&quot;])" />
+                <metadata name="attempt" value="@(((int)context.Variables[&quot;attempt&quot;]).ToString())" />
+                <metadata name="status_code" value="@(context.Response.StatusCode.ToString())" />
+                <metadata name="request_host" value="@(context.Request.Url.Host)" />
+                <metadata name="served_deployment" value="@(context.Response.Headers.GetValueOrDefault(&quot;x-ms-deployment-name&quot;, &quot;not-reported&quot;))" />
+                <metadata name="spillover_from" value="@(context.Response.Headers.GetValueOrDefault(&quot;x-ms-spillover-from-deployment&quot;, &quot;none&quot;))" />
+                <metadata name="spillover_error" value="@(context.Response.Headers.GetValueOrDefault(&quot;x-ms-spillover-error&quot;, &quot;none&quot;))" />
+                <metadata name="retry_after" value="@(context.Response.Headers.GetValueOrDefault(&quot;Retry-After&quot;, &quot;none&quot;))" />
+                <metadata name="serving_region" value="@(context.Response.Headers.GetValueOrDefault(&quot;x-ms-region&quot;, &quot;not-reported&quot;))" />
+            </trace>
+        </retry>
+    </backend>
+    <outbound>
+        <base />
+        <set-header name="x-client-request-id" exists-action="override">
+            <value>@((string)context.Variables["clientRequestId"])</value>
+        </set-header>
+        <set-header name="x-routing-attempts" exists-action="override">
+            <value>@(((int)context.Variables["attempt"]).ToString())</value>
+        </set-header>
+        <set-header name="x-routing-path" exists-action="override">
+            <value>@((string)context.Variables.GetValueOrDefault("path", "unknown"))</value>
+        </set-header>
+    </outbound>
+    <on-error>
+        <trace source="verify-routing-path" severity="error">
+            <message>routing-policy-error</message>
+            <metadata name="client_request_id" value="@((string)context.Variables.GetValueOrDefault(&quot;clientRequestId&quot;, context.RequestId.ToString()))" />
+            <metadata name="reason" value="@(string.IsNullOrEmpty(context.LastError.Reason) ? &quot;unknown&quot; : context.LastError.Reason)" />
+            <metadata name="message" value="@(string.IsNullOrEmpty(context.LastError.Message) ? &quot;unknown&quot; : context.LastError.Message)" />
+        </trace>
+        <base />
+    </on-error>
+</policies>
